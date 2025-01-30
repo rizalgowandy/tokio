@@ -1,3 +1,4 @@
+use core::future::Future;
 use futures_core::Stream;
 
 mod all;
@@ -7,53 +8,66 @@ mod any;
 use any::AnyFuture;
 
 mod chain;
-use chain::Chain;
+pub use chain::Chain;
 
 pub(crate) mod collect;
 use collect::{Collect, FromStream};
 
 mod filter;
-use filter::Filter;
+pub use filter::Filter;
 
 mod filter_map;
-use filter_map::FilterMap;
+pub use filter_map::FilterMap;
 
 mod fold;
 use fold::FoldFuture;
 
 mod fuse;
-use fuse::Fuse;
+pub use fuse::Fuse;
 
 mod map;
-use map::Map;
+pub use map::Map;
+
+mod map_while;
+pub use map_while::MapWhile;
 
 mod merge;
-use merge::Merge;
+pub use merge::Merge;
 
 mod next;
 use next::Next;
 
 mod skip;
-use skip::Skip;
+pub use skip::Skip;
 
 mod skip_while;
-use skip_while::SkipWhile;
+pub use skip_while::SkipWhile;
+
+mod take;
+pub use take::Take;
+
+mod take_while;
+pub use take_while::TakeWhile;
+
+mod then;
+pub use then::Then;
 
 mod try_next;
 use try_next::TryNext;
 
-mod take;
-use take::Take;
-
-mod take_while;
-use take_while::TakeWhile;
+mod peekable;
+pub use peekable::Peekable;
 
 cfg_time! {
-    mod timeout;
-    use timeout::Timeout;
-    use tokio::time::Duration;
+    pub(crate) mod timeout;
+    pub(crate) mod timeout_repeating;
+    pub use timeout::Timeout;
+    pub use timeout_repeating::TimeoutRepeating;
+    use tokio::time::{Duration, Interval};
     mod throttle;
     use throttle::{throttle, Throttle};
+    mod chunks_timeout;
+    pub use chunks_timeout::ChunksTimeout;
 }
 
 /// An extension trait for the [`Stream`] trait that provides a variety of
@@ -106,6 +120,12 @@ pub trait StreamExt: Stream {
     /// pinning it to the stack using the `pin_mut!` macro from the `pin_utils`
     /// crate.
     ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe. The returned future only
+    /// holds onto a reference to the underlying stream,
+    /// so dropping it will never lose a value.
+    ///
     /// # Examples
     ///
     /// ```
@@ -141,6 +161,12 @@ pub trait StreamExt: Stream {
     /// but returns a [`Result<Option<T>, E>`](Result) rather than
     /// an [`Option<Result<T, E>>`](Option), making for easy use
     /// with the [`?`](std::ops::Try) operator.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe. The returned future only
+    /// holds onto a reference to the underlying stream,
+    /// so dropping it will never lose a value.
     ///
     /// # Examples
     ///
@@ -195,6 +221,93 @@ pub trait StreamExt: Stream {
         Self: Sized,
     {
         Map::new(self, f)
+    }
+
+    /// Map this stream's items to a different type for as long as determined by
+    /// the provided closure. A stream of the target type will be returned,
+    /// which will yield elements until the closure returns `None`.
+    ///
+    /// The provided closure is executed over all elements of this stream as
+    /// they are made available, until it returns `None`. It is executed inline
+    /// with calls to [`poll_next`](Stream::poll_next). Once `None` is returned,
+    /// the underlying stream will not be polled again.
+    ///
+    /// Note that this function consumes the stream passed into it and returns a
+    /// wrapped version of it, similar to the [`Iterator::map_while`] method in the
+    /// standard library.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// use tokio_stream::{self as stream, StreamExt};
+    ///
+    /// let stream = stream::iter(1..=10);
+    /// let mut stream = stream.map_while(|x| {
+    ///     if x < 4 {
+    ///         Some(x + 3)
+    ///     } else {
+    ///         None
+    ///     }
+    /// });
+    /// assert_eq!(stream.next().await, Some(4));
+    /// assert_eq!(stream.next().await, Some(5));
+    /// assert_eq!(stream.next().await, Some(6));
+    /// assert_eq!(stream.next().await, None);
+    /// # }
+    /// ```
+    fn map_while<T, F>(self, f: F) -> MapWhile<Self, F>
+    where
+        F: FnMut(Self::Item) -> Option<T>,
+        Self: Sized,
+    {
+        MapWhile::new(self, f)
+    }
+
+    /// Maps this stream's items asynchronously to a different type, returning a
+    /// new stream of the resulting type.
+    ///
+    /// The provided closure is executed over all elements of this stream as
+    /// they are made available, and the returned future is executed. Only one
+    /// future is executed at the time.
+    ///
+    /// Note that this function consumes the stream passed into it and returns a
+    /// wrapped version of it, similar to the existing `then` methods in the
+    /// standard library.
+    ///
+    /// Be aware that if the future is not `Unpin`, then neither is the `Stream`
+    /// returned by this method. To handle this, you can use `tokio::pin!` as in
+    /// the example below or put the stream in a `Box` with `Box::pin(stream)`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// use tokio_stream::{self as stream, StreamExt};
+    ///
+    /// async fn do_async_work(value: i32) -> i32 {
+    ///     value + 3
+    /// }
+    ///
+    /// let stream = stream::iter(1..=3);
+    /// let stream = stream.then(do_async_work);
+    ///
+    /// tokio::pin!(stream);
+    ///
+    /// assert_eq!(stream.next().await, Some(4));
+    /// assert_eq!(stream.next().await, Some(5));
+    /// assert_eq!(stream.next().await, Some(6));
+    /// # }
+    /// ```
+    fn then<F, Fut>(self, f: F) -> Then<Self, Fut, F>
+    where
+        F: FnMut(Self::Item) -> Fut,
+        Fut: Future,
+        Self: Sized,
+    {
+        Then::new(self, f)
     }
 
     /// Combine two streams into one by interleaving the output of both as it
@@ -738,8 +851,7 @@ pub trait StreamExt: Stream {
     ///
     /// `collect` streams all values, awaiting as needed. Values are pushed into
     /// a collection. A number of different target collection types are
-    /// supported, including [`Vec`](std::vec::Vec),
-    /// [`String`](std::string::String), and [`Bytes`].
+    /// supported, including [`Vec`], [`String`], and [`Bytes`].
     ///
     /// [`Bytes`]: https://docs.rs/bytes/0.6.0/bytes/struct.Bytes.html
     ///
@@ -816,7 +928,9 @@ pub trait StreamExt: Stream {
     /// If the wrapped stream yields a value before the deadline is reached, the
     /// value is returned. Otherwise, an error is returned. The caller may decide
     /// to continue consuming the stream and will eventually get the next source
-    /// stream value once it becomes available.
+    /// stream value once it becomes available. See
+    /// [`timeout_repeating`](StreamExt::timeout_repeating) for an alternative
+    /// where the timeouts will repeat.
     ///
     /// # Notes
     ///
@@ -863,7 +977,26 @@ pub trait StreamExt: Stream {
     /// assert_eq!(int_stream.try_next().await, Ok(None));
     /// # }
     /// ```
-    #[cfg(all(feature = "time"))]
+    ///
+    /// Once a timeout error is received, no further events will be received
+    /// unless the wrapped stream yields a value (timeouts do not repeat).
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// # async fn main() {
+    /// use tokio_stream::{StreamExt, wrappers::IntervalStream};
+    /// use std::time::Duration;
+    /// let interval_stream = IntervalStream::new(tokio::time::interval(Duration::from_millis(100)));
+    /// let timeout_stream = interval_stream.timeout(Duration::from_millis(10));
+    /// tokio::pin!(timeout_stream);
+    ///
+    /// // Only one timeout will be received between values in the source stream.
+    /// assert!(timeout_stream.try_next().await.is_ok());
+    /// assert!(timeout_stream.try_next().await.is_err(), "expected one timeout");
+    /// assert!(timeout_stream.try_next().await.is_ok(), "expected no more timeouts");
+    /// # }
+    /// ```
+    #[cfg(feature = "time")]
     #[cfg_attr(docsrs, doc(cfg(feature = "time")))]
     fn timeout(self, duration: Duration) -> Timeout<Self>
     where
@@ -872,7 +1005,97 @@ pub trait StreamExt: Stream {
         Timeout::new(self, duration)
     }
 
+    /// Applies a per-item timeout to the passed stream.
+    ///
+    /// `timeout_repeating()` takes an [`Interval`] that controls the time each
+    /// element of the stream has to complete before timing out.
+    ///
+    /// If the wrapped stream yields a value before the deadline is reached, the
+    /// value is returned. Otherwise, an error is returned. The caller may decide
+    /// to continue consuming the stream and will eventually get the next source
+    /// stream value once it becomes available. Unlike `timeout()`, if no value
+    /// becomes available before the deadline is reached, additional errors are
+    /// returned at the specified interval. See [`timeout`](StreamExt::timeout)
+    /// for an alternative where the timeouts do not repeat.
+    ///
+    /// # Notes
+    ///
+    /// This function consumes the stream passed into it and returns a
+    /// wrapped version of it.
+    ///
+    /// Polling the returned stream will continue to poll the inner stream even
+    /// if one or more items time out.
+    ///
+    /// # Examples
+    ///
+    /// Suppose we have a stream `int_stream` that yields 3 numbers (1, 2, 3):
+    ///
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// use tokio_stream::{self as stream, StreamExt};
+    /// use std::time::Duration;
+    /// # let int_stream = stream::iter(1..=3);
+    ///
+    /// let int_stream = int_stream.timeout_repeating(tokio::time::interval(Duration::from_secs(1)));
+    /// tokio::pin!(int_stream);
+    ///
+    /// // When no items time out, we get the 3 elements in succession:
+    /// assert_eq!(int_stream.try_next().await, Ok(Some(1)));
+    /// assert_eq!(int_stream.try_next().await, Ok(Some(2)));
+    /// assert_eq!(int_stream.try_next().await, Ok(Some(3)));
+    /// assert_eq!(int_stream.try_next().await, Ok(None));
+    ///
+    /// // If the second item times out, we get an error and continue polling the stream:
+    /// # let mut int_stream = stream::iter(vec![Ok(1), Err(()), Ok(2), Ok(3)]);
+    /// assert_eq!(int_stream.try_next().await, Ok(Some(1)));
+    /// assert!(int_stream.try_next().await.is_err());
+    /// assert_eq!(int_stream.try_next().await, Ok(Some(2)));
+    /// assert_eq!(int_stream.try_next().await, Ok(Some(3)));
+    /// assert_eq!(int_stream.try_next().await, Ok(None));
+    ///
+    /// // If we want to stop consuming the source stream the first time an
+    /// // element times out, we can use the `take_while` operator:
+    /// # let int_stream = stream::iter(vec![Ok(1), Err(()), Ok(2), Ok(3)]);
+    /// let mut int_stream = int_stream.take_while(Result::is_ok);
+    ///
+    /// assert_eq!(int_stream.try_next().await, Ok(Some(1)));
+    /// assert_eq!(int_stream.try_next().await, Ok(None));
+    /// # }
+    /// ```
+    ///
+    /// Timeout errors will be continuously produced at the specified interval
+    /// until the wrapped stream yields a value.
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// # async fn main() {
+    /// use tokio_stream::{StreamExt, wrappers::IntervalStream};
+    /// use std::time::Duration;
+    /// let interval_stream = IntervalStream::new(tokio::time::interval(Duration::from_millis(23)));
+    /// let timeout_stream = interval_stream.timeout_repeating(tokio::time::interval(Duration::from_millis(9)));
+    /// tokio::pin!(timeout_stream);
+    ///
+    /// // Multiple timeouts will be received between values in the source stream.
+    /// assert!(timeout_stream.try_next().await.is_ok());
+    /// assert!(timeout_stream.try_next().await.is_err(), "expected one timeout");
+    /// assert!(timeout_stream.try_next().await.is_err(), "expected a second timeout");
+    /// // Will eventually receive another value from the source stream...
+    /// assert!(timeout_stream.try_next().await.is_ok(), "expected non-timeout");
+    /// # }
+    /// ```
+    #[cfg(feature = "time")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "time")))]
+    fn timeout_repeating(self, interval: Interval) -> TimeoutRepeating<Self>
+    where
+        Self: Sized,
+    {
+        TimeoutRepeating::new(self, interval)
+    }
+
     /// Slows down a stream by enforcing a delay between items.
+    ///
+    /// The underlying timer behind this utility has a granularity of one millisecond.
     ///
     /// # Example
     ///
@@ -891,13 +1114,95 @@ pub trait StreamExt: Stream {
     /// }
     /// # }
     /// ```
-    #[cfg(all(feature = "time"))]
+    #[cfg(feature = "time")]
     #[cfg_attr(docsrs, doc(cfg(feature = "time")))]
     fn throttle(self, duration: Duration) -> Throttle<Self>
     where
         Self: Sized,
     {
         throttle(duration, self)
+    }
+
+    /// Batches the items in the given stream using a maximum duration and size for each batch.
+    ///
+    /// This stream returns the next batch of items in the following situations:
+    ///  1. The inner stream has returned at least `max_size` many items since the last batch.
+    ///  2. The time since the first item of a batch is greater than the given duration.
+    ///  3. The end of the stream is reached.
+    ///
+    /// The length of the returned vector is never empty or greater than the maximum size. Empty batches
+    /// will not be emitted if no items are received upstream.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if `max_size` is zero
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use std::time::Duration;
+    /// use tokio::time;
+    /// use tokio_stream::{self as stream, StreamExt};
+    /// use futures::FutureExt;
+    ///
+    /// #[tokio::main]
+    /// # async fn _unused() {}
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// async fn main() {
+    ///     let iter = vec![1, 2, 3, 4].into_iter();
+    ///     let stream0 = stream::iter(iter);
+    ///
+    ///     let iter = vec![5].into_iter();
+    ///     let stream1 = stream::iter(iter)
+    ///          .then(move |n| time::sleep(Duration::from_secs(5)).map(move |_| n));
+    ///
+    ///     let chunk_stream = stream0
+    ///         .chain(stream1)
+    ///         .chunks_timeout(3, Duration::from_secs(2));
+    ///     tokio::pin!(chunk_stream);
+    ///
+    ///     // a full batch was received
+    ///     assert_eq!(chunk_stream.next().await, Some(vec![1,2,3]));
+    ///     // deadline was reached before max_size was reached
+    ///     assert_eq!(chunk_stream.next().await, Some(vec![4]));
+    ///     // last element in the stream
+    ///     assert_eq!(chunk_stream.next().await, Some(vec![5]));
+    /// }
+    /// ```
+    #[cfg(feature = "time")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "time")))]
+    #[track_caller]
+    fn chunks_timeout(self, max_size: usize, duration: Duration) -> ChunksTimeout<Self>
+    where
+        Self: Sized,
+    {
+        assert!(max_size > 0, "`max_size` must be non-zero.");
+        ChunksTimeout::new(self, max_size, duration)
+    }
+
+    /// Turns the stream into a peekable stream, whose next element can be peeked at without being
+    /// consumed.
+    /// ```rust
+    /// use tokio_stream::{self as stream, StreamExt};
+    ///
+    /// #[tokio::main]
+    /// # async fn _unused() {}
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// async fn main() {
+    ///     let iter = vec![1, 2, 3, 4].into_iter();
+    ///     let mut stream = stream::iter(iter).peekable();
+    ///
+    ///     assert_eq!(*stream.peek().await.unwrap(), 1);
+    ///     assert_eq!(*stream.peek().await.unwrap(), 1);
+    ///     assert_eq!(stream.next().await.unwrap(), 1);
+    ///     assert_eq!(*stream.peek().await.unwrap(), 2);
+    /// }
+    /// ```
+    fn peekable(self) -> Peekable<Self>
+    where
+        Self: Sized,
+    {
+        Peekable::new(self)
     }
 }
 
@@ -906,10 +1211,10 @@ impl<St: ?Sized> StreamExt for St where St: Stream {}
 /// Merge the size hints from two streams.
 fn merge_size_hints(
     (left_low, left_high): (usize, Option<usize>),
-    (right_low, right_hign): (usize, Option<usize>),
+    (right_low, right_high): (usize, Option<usize>),
 ) -> (usize, Option<usize>) {
     let low = left_low.saturating_add(right_low);
-    let high = match (left_high, right_hign) {
+    let high = match (left_high, right_high) {
         (Some(h1), Some(h2)) => h1.checked_add(h2),
         _ => None,
     };

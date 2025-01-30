@@ -10,19 +10,15 @@ mod loom;
 mod pin;
 
 #[macro_use]
-mod ready;
+mod thread_local;
 
 #[macro_use]
-mod thread_local;
+mod addr_of;
 
 cfg_trace! {
     #[macro_use]
     mod trace;
 }
-
-#[macro_use]
-#[cfg(feature = "rt")]
-pub(crate) mod scoped_tls;
 
 cfg_macros! {
     #[macro_use]

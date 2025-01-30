@@ -1,6 +1,8 @@
-//! Use POSIX AIO futures with Tokio
+//! Use POSIX AIO futures with Tokio.
 
-use crate::io::driver::{Handle, Interest, ReadyEvent, Registration};
+use crate::io::interest::Interest;
+use crate::runtime::io::{ReadyEvent, Registration};
+use crate::runtime::scheduler;
 use mio::event::Source;
 use mio::Registry;
 use mio::Token;
@@ -9,21 +11,21 @@ use std::io;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::prelude::RawFd;
-use std::task::{Context, Poll};
+use std::task::{ready, Context, Poll};
 
 /// Like [`mio::event::Source`], but for POSIX AIO only.
 ///
 /// Tokio's consumer must pass an implementor of this trait to create a
 /// [`Aio`] object.
 pub trait AioSource {
-    /// Register this AIO event source with Tokio's reactor
+    /// Registers this AIO event source with Tokio's reactor.
     fn register(&mut self, kq: RawFd, token: usize);
 
-    /// Deregister this AIO event source with Tokio's reactor
+    /// Deregisters this AIO event source with Tokio's reactor.
     fn deregister(&mut self);
 }
 
-/// Wrap the user's AioSource in order to implement mio::event::Source, which
+/// Wraps the user's AioSource in order to implement mio::event::Source, which
 /// is what the rest of the crate wants.
 struct MioSource<T>(T);
 
@@ -117,7 +119,7 @@ impl<E: AioSource> Aio<E> {
 
     fn new_with_interest(io: E, interest: Interest) -> io::Result<Self> {
         let mut io = MioSource(io);
-        let handle = Handle::current();
+        let handle = scheduler::Handle::current();
         let registration = Registration::new_with_interest_and_handle(&mut io, interest, handle)?;
         Ok(Self { io, registration })
     }
@@ -162,7 +164,7 @@ impl<E: AioSource> Aio<E> {
     /// is scheduled to receive a wakeup when the underlying operation
     /// completes. Note that on multiple calls to `poll_ready`, only the `Waker` from the
     /// `Context` passed to the most recent call is scheduled to receive a wakeup.
-    pub fn poll_ready<'a>(&'a self, cx: &mut Context<'_>) -> Poll<io::Result<AioEvent>> {
+    pub fn poll_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<AioEvent>> {
         let ev = ready!(self.registration.poll_read_ready(cx))?;
         Poll::Ready(Ok(AioEvent(ev)))
     }

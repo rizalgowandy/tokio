@@ -14,8 +14,18 @@ use std::task::{Context, Poll};
 pin_project! {
     /// A [`Stream`] of messages decoded from an [`AsyncRead`].
     ///
+    /// For examples of how to use `FramedRead` with a codec, see the
+    /// examples on the [`codec`] module.
+    ///
+    /// # Cancellation safety
+    /// * [`tokio_stream::StreamExt::next`]: This method is cancel safe. The returned
+    /// future only holds onto a reference to the underlying stream, so dropping it will
+    /// never lose a value.
+    ///
     /// [`Stream`]: futures_core::Stream
     /// [`AsyncRead`]: tokio::io::AsyncRead
+    /// [`codec`]: crate::codec
+    /// [`tokio_stream::StreamExt::next`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.next
     pub struct FramedRead<T, D> {
         #[pin]
         inner: FramedImpl<T, D, ReadFrame>,
@@ -51,6 +61,7 @@ where
                     eof: false,
                     is_readable: false,
                     buffer: BytesMut::with_capacity(capacity),
+                    has_errored: false,
                 },
             },
         }
@@ -105,6 +116,32 @@ impl<T, D> FramedRead<T, D> {
     /// Returns a mutable reference to the underlying decoder.
     pub fn decoder_mut(&mut self) -> &mut D {
         &mut self.inner.codec
+    }
+
+    /// Maps the decoder `D` to `C`, preserving the read buffer
+    /// wrapped by `Framed`.
+    pub fn map_decoder<C, F>(self, map: F) -> FramedRead<T, C>
+    where
+        F: FnOnce(D) -> C,
+    {
+        // This could be potentially simplified once rust-lang/rust#86555 hits stable
+        let FramedImpl {
+            inner,
+            state,
+            codec,
+        } = self.inner;
+        FramedRead {
+            inner: FramedImpl {
+                inner,
+                state,
+                codec: map(codec),
+            },
+        }
+    }
+
+    /// Returns a mutable reference to the underlying decoder.
+    pub fn decoder_pin_mut(self: Pin<&mut Self>) -> &mut D {
+        self.project().inner.project().codec
     }
 
     /// Returns a reference to the read buffer.

@@ -31,13 +31,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:8080".to_string());
     let server = TcpListener::bind(&addr).await?;
-    println!("Listening on: {}", addr);
+    println!("Listening on: {addr}");
 
     loop {
         let (stream, _) = server.accept().await?;
         tokio::spawn(async move {
             if let Err(e) = process(stream).await {
-                println!("failed to process connection; error = {}", e);
+                println!("failed to process connection; error = {e}");
             }
         });
     }
@@ -159,7 +159,7 @@ impl Decoder for Http {
             let mut parsed_headers = [httparse::EMPTY_HEADER; 16];
             let mut r = httparse::Request::new(&mut parsed_headers);
             let status = r.parse(src).map_err(|e| {
-                let msg = format!("failed to parse http request: {:?}", e);
+                let msg = format!("failed to parse http request: {e:?}");
                 io::Error::new(io::ErrorKind::Other, msg)
             })?;
 
@@ -180,8 +180,11 @@ impl Decoder for Http {
                 headers[i] = Some((k, v));
             }
 
+            let method = http::Method::try_from(r.method.unwrap())
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
             (
-                toslice(r.method.unwrap().as_bytes()),
+                method,
                 toslice(r.path.unwrap().as_bytes()),
                 r.version.unwrap(),
                 amt,
@@ -195,7 +198,7 @@ impl Decoder for Http {
         }
         let data = src.split_to(amt).freeze();
         let mut ret = Request::builder();
-        ret = ret.method(&data[method.0..method.1]);
+        ret = ret.method(method);
         let s = data.slice(path.0..path.1);
         let s = unsafe { String::from_utf8_unchecked(Vec::from(s.as_ref())) };
         ret = ret.uri(s);
@@ -256,11 +259,11 @@ mod date {
         unix_date: u64,
     }
 
-    thread_local!(static LAST: RefCell<LastRenderedNow> = RefCell::new(LastRenderedNow {
+    thread_local!(static LAST: RefCell<LastRenderedNow> = const { RefCell::new(LastRenderedNow {
         bytes: [0; 128],
         amt: 0,
         unix_date: 0,
-    }));
+    }) });
 
     impl fmt::Display for Now {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

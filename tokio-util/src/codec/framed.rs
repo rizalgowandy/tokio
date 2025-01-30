@@ -20,10 +20,21 @@ pin_project! {
     /// You can create a `Framed` instance by using the [`Decoder::framed`] adapter, or
     /// by using the `new` function seen below.
     ///
+    /// # Cancellation safety
+    ///
+    /// * [`futures_util::sink::SinkExt::send`]: if send is used as the event in a
+    /// `tokio::select!` statement and some other branch completes first, then it is
+    /// guaranteed that the message was not sent, but the message itself is lost.
+    /// * [`tokio_stream::StreamExt::next`]: This method is cancel safe. The returned
+    /// future only holds onto a reference to the underlying stream, so dropping it will
+    /// never lose a value.
+    ///
     /// [`Stream`]: futures_core::Stream
     /// [`Sink`]: futures_sink::Sink
     /// [`AsyncRead`]: tokio::io::AsyncRead
     /// [`Decoder::framed`]: crate::codec::Decoder::framed()
+    /// [`futures_util::sink::SinkExt::send`]: futures_util::sink::SinkExt::send
+    /// [`tokio_stream::StreamExt::next`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.next
     pub struct Framed<T, U> {
         #[pin]
         inner: FramedImpl<T, U, RWFrames>
@@ -106,6 +117,7 @@ where
                         eof: false,
                         is_readable: false,
                         buffer: BytesMut::with_capacity(capacity),
+                        has_errored: false,
                     },
                     write: WriteFrame::default(),
                 },
@@ -129,7 +141,7 @@ impl<T, U> Framed<T, U> {
     /// things like gzip or TLS, which require both read and write access to the
     /// underlying object.
     ///
-    /// This objects takes a stream and a readbuffer and a writebuffer. These field
+    /// This objects takes a stream and a `readbuffer` and a `writebuffer`. These field
     /// can be obtained from an existing `Framed` with the [`into_parts`] method.
     ///
     /// If you want to work more directly with the streams and sink, consider
@@ -203,6 +215,35 @@ impl<T, U> Framed<T, U> {
         &mut self.inner.codec
     }
 
+    /// Maps the codec `U` to `C`, preserving the read and write buffers
+    /// wrapped by `Framed`.
+    ///
+    /// Note that care should be taken to not tamper with the underlying codec
+    /// as it may corrupt the stream of frames otherwise being worked with.
+    pub fn map_codec<C, F>(self, map: F) -> Framed<T, C>
+    where
+        F: FnOnce(U) -> C,
+    {
+        // This could be potentially simplified once rust-lang/rust#86555 hits stable
+        let parts = self.into_parts();
+        Framed::from_parts(FramedParts {
+            io: parts.io,
+            codec: map(parts.codec),
+            read_buf: parts.read_buf,
+            write_buf: parts.write_buf,
+            _priv: (),
+        })
+    }
+
+    /// Returns a mutable reference to the underlying codec wrapped by
+    /// `Framed`.
+    ///
+    /// Note that care should be taken to not tamper with the underlying codec
+    /// as it may corrupt the stream of frames otherwise being worked with.
+    pub fn codec_pin_mut(self: Pin<&mut Self>) -> &mut U {
+        self.project().inner.project().codec
+    }
+
     /// Returns a reference to the read buffer.
     pub fn read_buffer(&self) -> &BytesMut {
         &self.inner.state.read.buffer
@@ -221,6 +262,16 @@ impl<T, U> Framed<T, U> {
     /// Returns a mutable reference to the write buffer.
     pub fn write_buffer_mut(&mut self) -> &mut BytesMut {
         &mut self.inner.state.write.buffer
+    }
+
+    /// Returns backpressure boundary
+    pub fn backpressure_boundary(&self) -> usize {
+        self.inner.state.write.backpressure_boundary
+    }
+
+    /// Updates backpressure boundary
+    pub fn set_backpressure_boundary(&mut self, boundary: usize) {
+        self.inner.state.write.backpressure_boundary = boundary;
     }
 
     /// Consumes the `Framed`, returning its underlying I/O stream.

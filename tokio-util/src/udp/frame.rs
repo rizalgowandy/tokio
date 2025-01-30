@@ -4,10 +4,9 @@ use futures_core::Stream;
 use tokio::{io::ReadBuf, net::UdpSocket};
 
 use bytes::{BufMut, BytesMut};
-use futures_core::ready;
 use futures_sink::Sink;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{ready, Context, Poll};
 use std::{
     borrow::Borrow,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
@@ -81,17 +80,21 @@ where
             }
 
             // We're out of data. Try and fetch more data to decode
-            let addr = unsafe {
-                // Convert `&mut [MaybeUnit<u8>]` to `&mut [u8]` because we will be
-                // writing to it via `poll_recv_from` and therefore initializing the memory.
-                let buf = &mut *(pin.rd.chunk_mut() as *mut _ as *mut [MaybeUninit<u8>]);
+            let addr = {
+                // Safety: `chunk_mut()` returns a `&mut UninitSlice`, and `UninitSlice` is a
+                // transparent wrapper around `[MaybeUninit<u8>]`.
+                let buf = unsafe { &mut *(pin.rd.chunk_mut() as *mut _ as *mut [MaybeUninit<u8>]) };
                 let mut read = ReadBuf::uninit(buf);
                 let ptr = read.filled().as_ptr();
                 let res = ready!(pin.socket.borrow().poll_recv_from(cx, &mut read));
 
                 assert_eq!(ptr, read.filled().as_ptr());
                 let addr = res?;
-                pin.rd.advance_mut(read.filled().len());
+
+                // Safety: This is guaranteed to be the number of initialized (and read) bytes due
+                // to the invariants provided by `ReadBuf::filled`.
+                unsafe { pin.rd.advance_mut(read.filled().len()) };
+
                 addr
             };
 

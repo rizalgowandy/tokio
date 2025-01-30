@@ -6,13 +6,13 @@ use std::io;
 use std::marker::PhantomPinned;
 use std::marker::Unpin;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{ready, Context, Poll};
 
 /// A future which can be used to easily read exactly enough bytes to fill
 /// a buffer.
 ///
 /// Created by the [`AsyncReadExt::read_exact`][read_exact].
-/// [read_exact]: [crate::io::AsyncReadExt::read_exact]
+/// [`read_exact`]: [`crate::io::AsyncReadExt::read_exact`]
 pub(crate) fn read_exact<'a, A>(reader: &'a mut A, buf: &'a mut [u8]) -> ReadExact<'a, A>
 where
     A: AsyncRead + Unpin + ?Sized,
@@ -51,13 +51,13 @@ where
     type Output = io::Result<usize>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
-        let mut me = self.project();
+        let me = self.project();
 
         loop {
             // if our buffer is empty, then we need to read some data to continue.
             let rem = me.buf.remaining();
             if rem != 0 {
-                ready!(Pin::new(&mut *me.reader).poll_read(cx, &mut me.buf))?;
+                ready!(Pin::new(&mut *me.reader).poll_read(cx, me.buf))?;
                 if me.buf.remaining() == rem {
                     return Err(eof()).into();
                 }

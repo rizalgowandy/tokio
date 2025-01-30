@@ -108,11 +108,22 @@ impl OwnedReadHalf {
         reunite(self, other)
     }
 
-    /// Wait for any of the requested ready states.
+    /// Waits for any of the requested ready states.
     ///
-    /// This function is usually paired with `try_read()` or `try_write()`. It
-    /// can be used to concurrently read / write to the same socket on a single
-    /// task without splitting the socket.
+    /// This function is usually paired with [`try_read()`]. It can be used instead
+    /// of [`readable()`] to check the returned ready set for [`Ready::READABLE`]
+    /// and [`Ready::READ_CLOSED`] events.
+    ///
+    /// The function may complete without the socket being ready. This is a
+    /// false-positive and attempting an operation will return with
+    /// `io::ErrorKind::WouldBlock`. The function can also return with an empty
+    /// [`Ready`] set, so you should always check the returned value and possibly
+    /// wait again if the requested states are not set.
+    ///
+    /// This function is equivalent to [`UnixStream::ready`].
+    ///
+    /// [`try_read()`]: Self::try_read
+    /// [`readable()`]: Self::readable
     ///
     /// # Cancel safety
     ///
@@ -124,7 +135,7 @@ impl OwnedReadHalf {
         self.inner.ready(interest).await
     }
 
-    /// Wait for the socket to become readable.
+    /// Waits for the socket to become readable.
     ///
     /// This function is equivalent to `ready(Interest::READABLE)` and is usually
     /// paired with `try_read()`.
@@ -139,7 +150,7 @@ impl OwnedReadHalf {
         self.inner.readable().await
     }
 
-    /// Try to read data from the stream into the provided buffer, returning how
+    /// Tries to read data from the stream into the provided buffer, returning how
     /// many bytes were read.
     ///
     /// Receives any pending data from the socket but does not wait for new data
@@ -155,15 +166,19 @@ impl OwnedReadHalf {
     /// # Return
     ///
     /// If data is successfully read, `Ok(n)` is returned, where `n` is the
-    /// number of bytes read. `Ok(0)` indicates the stream's read half is closed
-    /// and will no longer yield data. If the stream is not ready to read data
+    /// number of bytes read. If `n` is `0`, then it can indicate one of two scenarios:
+    ///
+    /// 1. The stream's read half is closed and will no longer yield data.
+    /// 2. The specified buffer was 0 bytes in length.
+    ///
+    /// If the stream is not ready to read data,
     /// `Err(io::ErrorKind::WouldBlock)` is returned.
     pub fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
         self.inner.try_read(buf)
     }
 
     cfg_io_util! {
-        /// Try to read data from the stream into the provided buffer, advancing the
+        /// Tries to read data from the stream into the provided buffer, advancing the
         /// buffer's internal cursor, returning how many bytes were read.
         ///
         /// Receives any pending data from the socket but does not wait for new data
@@ -187,7 +202,7 @@ impl OwnedReadHalf {
         }
     }
 
-    /// Try to read data from the stream into the provided buffers, returning
+    /// Tries to read data from the stream into the provided buffers, returning
     /// how many bytes were read.
     ///
     /// Data is copied to fill each buffer in order, with the final buffer
@@ -247,7 +262,7 @@ impl OwnedWriteHalf {
         reunite(other, self)
     }
 
-    /// Destroy the write half, but don't close the write half of the stream
+    /// Destroys the write half, but don't close the write half of the stream
     /// until the read half is dropped. If the read half has already been
     /// dropped, this closes the stream.
     pub fn forget(mut self) {
@@ -255,11 +270,22 @@ impl OwnedWriteHalf {
         drop(self);
     }
 
-    /// Wait for any of the requested ready states.
+    /// Waits for any of the requested ready states.
     ///
-    /// This function is usually paired with `try_read()` or `try_write()`. It
-    /// can be used to concurrently read / write to the same socket on a single
-    /// task without splitting the socket.
+    /// This function is usually paired with [`try_write()`]. It can be used instead
+    /// of [`writable()`] to check the returned ready set for [`Ready::WRITABLE`]
+    /// and [`Ready::WRITE_CLOSED`] events.
+    ///
+    /// The function may complete without the socket being ready. This is a
+    /// false-positive and attempting an operation will return with
+    /// `io::ErrorKind::WouldBlock`. The function can also return with an empty
+    /// [`Ready`] set, so you should always check the returned value and possibly
+    /// wait again if the requested states are not set.
+    ///
+    /// This function is equivalent to [`UnixStream::ready`].
+    ///
+    /// [`try_write()`]: Self::try_write
+    /// [`writable()`]: Self::writable
     ///
     /// # Cancel safety
     ///
@@ -271,7 +297,7 @@ impl OwnedWriteHalf {
         self.inner.ready(interest).await
     }
 
-    /// Wait for the socket to become writable.
+    /// Waits for the socket to become writable.
     ///
     /// This function is equivalent to `ready(Interest::WRITABLE)` and is usually
     /// paired with `try_write()`.
@@ -286,7 +312,7 @@ impl OwnedWriteHalf {
         self.inner.writable().await
     }
 
-    /// Try to write a buffer to the stream, returning how many bytes were
+    /// Tries to write a buffer to the stream, returning how many bytes were
     /// written.
     ///
     /// The function will attempt to write the entire contents of `buf`, but
@@ -303,7 +329,7 @@ impl OwnedWriteHalf {
         self.inner.try_write(buf)
     }
 
-    /// Try to write several buffers to the stream, returning how many bytes
+    /// Tries to write several buffers to the stream, returning how many bytes
     /// were written.
     ///
     /// Data is written from each buffer in order, with the final buffer read
@@ -382,12 +408,12 @@ impl AsyncWrite for OwnedWriteHalf {
 
 impl AsRef<UnixStream> for OwnedReadHalf {
     fn as_ref(&self) -> &UnixStream {
-        &*self.inner
+        &self.inner
     }
 }
 
 impl AsRef<UnixStream> for OwnedWriteHalf {
     fn as_ref(&self) -> &UnixStream {
-        &*self.inner
+        &self.inner
     }
 }

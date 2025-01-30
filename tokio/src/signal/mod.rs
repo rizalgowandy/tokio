@@ -1,4 +1,4 @@
-//! Asynchronous signal handling for Tokio
+//! Asynchronous signal handling for Tokio.
 //!
 //! Note that signal handling is in general a very tricky topic and should be
 //! used with great care. This crate attempts to implement 'best practice' for
@@ -23,7 +23,7 @@
 //! }
 //! ```
 //!
-//! Wait for SIGHUP on Unix
+//! Wait for `SIGHUP` on Unix
 //!
 //! ```rust,no_run
 //! # #[cfg(unix)] {
@@ -45,10 +45,12 @@
 use crate::sync::watch::Receiver;
 use std::task::{Context, Poll};
 
+#[cfg(feature = "signal")]
 mod ctrl_c;
+#[cfg(feature = "signal")]
 pub use ctrl_c::ctrl_c;
 
-mod registry;
+pub(crate) mod registry;
 
 mod os {
     #[cfg(unix)]
@@ -70,10 +72,8 @@ struct RxFuture {
 }
 
 async fn make_future(mut rx: Receiver<()>) -> Receiver<()> {
-    match rx.changed().await {
-        Ok(()) => rx,
-        Err(_) => panic!("signal sender went away"),
-    }
+    rx.changed().await.expect("signal sender went away");
+    rx
 }
 
 impl RxFuture {
@@ -84,7 +84,7 @@ impl RxFuture {
     }
 
     async fn recv(&mut self) -> Option<()> {
-        use crate::future::poll_fn;
+        use std::future::poll_fn;
         poll_fn(|cx| self.poll_recv(cx)).await
     }
 

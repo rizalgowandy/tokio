@@ -2,12 +2,13 @@ use std::any::Any;
 use std::fmt;
 use std::io;
 
+use super::Id;
 use crate::util::SyncWrapper;
-
 cfg_rt! {
     /// Task failed to execute to completion.
     pub struct JoinError {
         repr: Repr,
+        id: Id,
     }
 }
 
@@ -17,24 +18,30 @@ enum Repr {
 }
 
 impl JoinError {
-    pub(crate) fn cancelled() -> JoinError {
+    pub(crate) fn cancelled(id: Id) -> JoinError {
         JoinError {
             repr: Repr::Cancelled,
+            id,
         }
     }
 
-    pub(crate) fn panic(err: Box<dyn Any + Send + 'static>) -> JoinError {
+    pub(crate) fn panic(id: Id, err: Box<dyn Any + Send + 'static>) -> JoinError {
         JoinError {
             repr: Repr::Panic(SyncWrapper::new(err)),
+            id,
         }
     }
 
-    /// Returns true if the error was caused by the task being cancelled
+    /// Returns true if the error was caused by the task being cancelled.
+    ///
+    /// See [the module level docs] for more information on cancellation.
+    ///
+    /// [the module level docs]: crate::task#cancellation
     pub fn is_cancelled(&self) -> bool {
         matches!(&self.repr, Repr::Cancelled)
     }
 
-    /// Returns true if the error was caused by the task panicking
+    /// Returns true if the error was caused by the task panicking.
     ///
     /// # Examples
     ///
@@ -79,6 +86,7 @@ impl JoinError {
     ///     }
     /// }
     /// ```
+    #[track_caller]
     pub fn into_panic(self) -> Box<dyn Any + Send + 'static> {
         self.try_into_panic()
             .expect("`JoinError` reason is not a panic.")
@@ -111,13 +119,32 @@ impl JoinError {
             _ => Err(self),
         }
     }
+
+    /// Returns a [task ID] that identifies the task which errored relative to
+    /// other currently spawned tasks.
+    ///
+    /// [task ID]: crate::task::Id
+    pub fn id(&self) -> Id {
+        self.id
+    }
 }
 
 impl fmt::Display for JoinError {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.repr {
-            Repr::Cancelled => write!(fmt, "cancelled"),
-            Repr::Panic(_) => write!(fmt, "panic"),
+            Repr::Cancelled => write!(fmt, "task {} was cancelled", self.id),
+            Repr::Panic(p) => match panic_payload_as_str(p) {
+                Some(panic_str) => {
+                    write!(
+                        fmt,
+                        "task {} panicked with message {:?}",
+                        self.id, panic_str
+                    )
+                }
+                None => {
+                    write!(fmt, "task {} panicked", self.id)
+                }
+            },
         }
     }
 }
@@ -125,8 +152,13 @@ impl fmt::Display for JoinError {
 impl fmt::Debug for JoinError {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.repr {
-            Repr::Cancelled => write!(fmt, "JoinError::Cancelled"),
-            Repr::Panic(_) => write!(fmt, "JoinError::Panic(...)"),
+            Repr::Cancelled => write!(fmt, "JoinError::Cancelled({:?})", self.id),
+            Repr::Panic(p) => match panic_payload_as_str(p) {
+                Some(panic_str) => {
+                    write!(fmt, "JoinError::Panic({:?}, {:?}, ...)", self.id, panic_str)
+                }
+                None => write!(fmt, "JoinError::Panic({:?}, ...)", self.id),
+            },
         }
     }
 }
@@ -143,4 +175,21 @@ impl From<JoinError> for io::Error {
             },
         )
     }
+}
+
+fn panic_payload_as_str(payload: &SyncWrapper<Box<dyn Any + Send>>) -> Option<&str> {
+    // Panic payloads are almost always `String` (if invoked with formatting arguments)
+    // or `&'static str` (if invoked with a string literal).
+    //
+    // Non-string panic payloads have niche use-cases,
+    // so we don't really need to worry about those.
+    if let Some(s) = payload.downcast_ref_sync::<String>() {
+        return Some(s);
+    }
+
+    if let Some(s) = payload.downcast_ref_sync::<&'static str>() {
+        return Some(s);
+    }
+
+    None
 }

@@ -1,9 +1,10 @@
 #![warn(rust_2018_idioms)]
 #![cfg(feature = "full")]
 #![cfg(windows)]
+#![cfg(not(miri))]
 
 use tokio::process::Command;
-use winapi::um::processthreadsapi::GetProcessId;
+use windows_sys::Win32::System::Threading::GetProcessId;
 
 #[tokio::test]
 async fn obtain_raw_handle() {

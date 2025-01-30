@@ -1,5 +1,5 @@
 #![warn(rust_2018_idioms)]
-#![cfg(feature = "full")]
+#![cfg(all(feature = "full", not(target_os = "wasi")))] // Wasi doesn't support bind
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, Interest};
 use tokio::net::{TcpListener, TcpStream};
@@ -7,13 +7,13 @@ use tokio::try_join;
 use tokio_test::task;
 use tokio_test::{assert_ok, assert_pending, assert_ready_ok};
 
+use std::future::poll_fn;
 use std::io;
 use std::task::Poll;
 use std::time::Duration;
 
-use futures::future::poll_fn;
-
 #[tokio::test]
+#[cfg_attr(miri, ignore)] // No `socket` on miri.
 async fn set_linger() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
 
@@ -29,6 +29,7 @@ async fn set_linger() {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)] // No `socket` on miri.
 async fn try_read_write() {
     const DATA: &[u8] = b"this is some data to write to the socket";
 
@@ -66,7 +67,7 @@ async fn try_read_write() {
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 break;
             }
-            Err(e) => panic!("error = {:?}", e),
+            Err(e) => panic!("error = {e:?}"),
         }
     }
 
@@ -85,7 +86,7 @@ async fn try_read_write() {
             match server.try_read(&mut read[i..]) {
                 Ok(n) => i += n,
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                Err(e) => panic!("error = {:?}", e),
+                Err(e) => panic!("error = {e:?}"),
             }
         }
 
@@ -107,7 +108,7 @@ async fn try_read_write() {
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 break;
             }
-            Err(e) => panic!("error = {:?}", e),
+            Err(e) => panic!("error = {e:?}"),
         }
     }
 
@@ -130,7 +131,7 @@ async fn try_read_write() {
             match server.try_read_vectored(&mut bufs) {
                 Ok(n) => i += n,
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                Err(e) => panic!("error = {:?}", e),
+                Err(e) => panic!("error = {e:?}"),
             }
         }
 
@@ -209,6 +210,7 @@ macro_rules! assert_not_writable_by_polling {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)] // No `socket` on miri.
 async fn poll_read_ready() {
     let (mut client, mut server) = create_pair().await;
 
@@ -232,6 +234,7 @@ async fn poll_read_ready() {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)] // No `socket` on miri.
 async fn poll_write_ready() {
     let (mut client, server) = create_pair().await;
 
@@ -254,33 +257,38 @@ async fn create_pair() -> (TcpStream, TcpStream) {
     (client, server)
 }
 
-fn read_until_pending(stream: &mut TcpStream) {
+fn read_until_pending(stream: &mut TcpStream) -> usize {
     let mut buf = vec![0u8; 1024 * 1024];
+    let mut total = 0;
     loop {
         match stream.try_read(&mut buf) {
-            Ok(_) => (),
+            Ok(n) => total += n,
             Err(err) => {
                 assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
                 break;
             }
         }
     }
+    total
 }
 
-fn write_until_pending(stream: &mut TcpStream) {
+fn write_until_pending(stream: &mut TcpStream) -> usize {
     let buf = vec![0u8; 1024 * 1024];
+    let mut total = 0;
     loop {
         match stream.try_write(&buf) {
-            Ok(_) => (),
+            Ok(n) => total += n,
             Err(err) => {
                 assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
                 break;
             }
         }
     }
+    total
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)] // No `socket` on miri.
 async fn try_read_buf() {
     const DATA: &[u8] = b"this is some data to write to the socket";
 
@@ -318,7 +326,7 @@ async fn try_read_buf() {
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 break;
             }
-            Err(e) => panic!("error = {:?}", e),
+            Err(e) => panic!("error = {e:?}"),
         }
     }
 
@@ -337,7 +345,7 @@ async fn try_read_buf() {
             match server.try_read_buf(&mut read) {
                 Ok(n) => i += n,
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                Err(e) => panic!("error = {:?}", e),
+                Err(e) => panic!("error = {e:?}"),
             }
         }
 
@@ -356,4 +364,43 @@ async fn try_read_buf() {
             tokio::task::yield_now().await;
         }
     }
+}
+
+// read_closed is a best effort event, so test only for no false positives.
+#[tokio::test]
+#[cfg_attr(miri, ignore)] // No `socket` on miri.
+async fn read_closed() {
+    let (client, mut server) = create_pair().await;
+
+    let mut ready_fut = task::spawn(client.ready(Interest::READABLE));
+    assert_pending!(ready_fut.poll());
+
+    assert_ok!(server.write_all(b"ping").await);
+
+    let ready_event = assert_ok!(ready_fut.await);
+
+    assert!(!ready_event.is_read_closed());
+}
+
+// write_closed is a best effort event, so test only for no false positives.
+#[tokio::test]
+#[cfg_attr(miri, ignore)] // No `socket` on miri.
+async fn write_closed() {
+    let (mut client, mut server) = create_pair().await;
+
+    // Fill the write buffer.
+    let write_size = write_until_pending(&mut client);
+    let mut ready_fut = task::spawn(client.ready(Interest::WRITABLE));
+    assert_pending!(ready_fut.poll());
+
+    // Drain the socket to make client writable.
+    let mut read_size = 0;
+    while read_size < write_size {
+        server.readable().await.unwrap();
+        read_size += read_until_pending(&mut server);
+    }
+
+    let ready_event = assert_ok!(ready_fut.await);
+
+    assert!(!ready_event.is_write_closed());
 }

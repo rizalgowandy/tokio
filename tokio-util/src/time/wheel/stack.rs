@@ -1,4 +1,6 @@
 use std::borrow::Borrow;
+use std::cmp::Eq;
+use std::hash::Hash;
 
 /// Abstracts the stack operations needed to track timeouts.
 pub(crate) trait Stack: Default {
@@ -6,7 +8,7 @@ pub(crate) trait Stack: Default {
     type Owned: Borrow<Self::Borrowed>;
 
     /// Borrowed item
-    type Borrowed;
+    type Borrowed: Eq + Hash;
 
     /// Item storage, this allows a slab to be used instead of just the heap
     type Store;
@@ -19,6 +21,9 @@ pub(crate) trait Stack: Default {
 
     /// Pop an item from the stack
     fn pop(&mut self, store: &mut Self::Store) -> Option<Self::Owned>;
+
+    /// Peek into the stack.
+    fn peek(&self) -> Option<Self::Owned>;
 
     fn remove(&mut self, item: &Self::Borrowed, store: &mut Self::Store);
 

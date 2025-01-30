@@ -1,16 +1,21 @@
-use crate::future::poll_fn;
 use crate::io::{AsyncRead, AsyncWrite, Interest, PollEvented, ReadBuf, Ready};
 use crate::net::unix::split::{split, ReadHalf, WriteHalf};
 use crate::net::unix::split_owned::{split_owned, OwnedReadHalf, OwnedWriteHalf};
 use crate::net::unix::ucred::{self, UCred};
 use crate::net::unix::SocketAddr;
 
-use std::convert::TryFrom;
 use std::fmt;
+use std::future::poll_fn;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
-use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
-use std::os::unix::net;
+#[cfg(target_os = "android")]
+use std::os::android::net::SocketAddrExt;
+#[cfg(target_os = "linux")]
+use std::os::linux::net::SocketAddrExt;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd};
+use std::os::unix::net::{self, SocketAddr as StdSocketAddr};
 use std::path::Path;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -22,8 +27,8 @@ cfg_io_util! {
 cfg_net_unix! {
     /// A structure representing a connected Unix socket.
     ///
-    /// This socket can be connected directly with `UnixStream::connect` or accepted
-    /// from a listener with `UnixListener::incoming`. Additionally, a pair of
+    /// This socket can be connected directly with [`UnixStream::connect`] or accepted
+    /// from a listener with [`UnixListener::accept`]. Additionally, a pair of
     /// anonymous Unix sockets can be created with `UnixStream::pair`.
     ///
     /// To shut down the stream in the write direction, you can call the
@@ -32,12 +37,32 @@ cfg_net_unix! {
     /// the stream in one direction.
     ///
     /// [`shutdown()`]: fn@crate::io::AsyncWriteExt::shutdown
+    /// [`UnixListener::accept`]: crate::net::UnixListener::accept
+    #[cfg_attr(docsrs, doc(alias = "uds"))]
     pub struct UnixStream {
         io: PollEvented<mio::net::UnixStream>,
     }
 }
 
 impl UnixStream {
+    pub(crate) async fn connect_mio(sys: mio::net::UnixStream) -> io::Result<UnixStream> {
+        let stream = UnixStream::new(sys)?;
+
+        // Once we've connected, wait for the stream to be writable as
+        // that's when the actual connection has been initiated. Once we're
+        // writable we check for `take_socket_error` to see if the connect
+        // actually hit an error or not.
+        //
+        // If all that succeeded then we ship everything on up.
+        poll_fn(|cx| stream.io.registration().poll_write_ready(cx)).await?;
+
+        if let Some(e) = stream.io.take_error()? {
+            return Err(e);
+        }
+
+        Ok(stream)
+    }
+
     /// Connects to the socket named by `path`.
     ///
     /// This function will create a new Unix socket and connect to the path
@@ -47,7 +72,20 @@ impl UnixStream {
     where
         P: AsRef<Path>,
     {
-        let stream = mio::net::UnixStream::connect(path)?;
+        // On linux, abstract socket paths need to be considered.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let addr = {
+            let os_str_bytes = path.as_ref().as_os_str().as_bytes();
+            if os_str_bytes.starts_with(b"\0") {
+                StdSocketAddr::from_abstract_name(&os_str_bytes[1..])?
+            } else {
+                StdSocketAddr::from_pathname(path)?
+            }
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let addr = StdSocketAddr::from_pathname(path)?;
+
+        let stream = mio::net::UnixStream::connect_addr(&addr)?;
         let stream = UnixStream::new(stream)?;
 
         poll_fn(|cx| stream.io.registration().poll_write_ready(cx)).await?;
@@ -59,11 +97,17 @@ impl UnixStream {
         Ok(stream)
     }
 
-    /// Wait for any of the requested ready states.
+    /// Waits for any of the requested ready states.
     ///
     /// This function is usually paired with `try_read()` or `try_write()`. It
     /// can be used to concurrently read / write to the same socket on a single
     /// task without splitting the socket.
+    ///
+    /// The function may complete without the socket being ready. This is a
+    /// false-positive and attempting an operation will return with
+    /// `io::ErrorKind::WouldBlock`. The function can also return with an empty
+    /// [`Ready`] set, so you should always check the returned value and possibly
+    /// wait again if the requested states are not set.
     ///
     /// # Cancel safety
     ///
@@ -98,7 +142,7 @@ impl UnixStream {
     ///             // if the readiness event is a false positive.
     ///             match stream.try_read(&mut data) {
     ///                 Ok(n) => {
-    ///                     println!("read {} bytes", n);        
+    ///                     println!("read {} bytes", n);
     ///                 }
     ///                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
     ///                     continue;
@@ -133,7 +177,7 @@ impl UnixStream {
         Ok(event.ready)
     }
 
-    /// Wait for the socket to become readable.
+    /// Waits for the socket to become readable.
     ///
     /// This function is equivalent to `ready(Interest::READABLE)` and is usually
     /// paired with `try_read()`.
@@ -239,8 +283,12 @@ impl UnixStream {
     /// # Return
     ///
     /// If data is successfully read, `Ok(n)` is returned, where `n` is the
-    /// number of bytes read. `Ok(0)` indicates the stream's read half is closed
-    /// and will no longer yield data. If the stream is not ready to read data
+    /// number of bytes read. If `n` is `0`, then it can indicate one of two scenarios:
+    ///
+    /// 1. The stream's read half is closed and will no longer yield data.
+    /// 2. The specified buffer was 0 bytes in length.
+    ///
+    /// If the stream is not ready to read data,
     /// `Err(io::ErrorKind::WouldBlock)` is returned.
     ///
     /// # Examples
@@ -290,7 +338,7 @@ impl UnixStream {
             .try_io(Interest::READABLE, || (&*self.io).read(buf))
     }
 
-    /// Try to read data from the stream into the provided buffers, returning
+    /// Tries to read data from the stream into the provided buffers, returning
     /// how many bytes were read.
     ///
     /// Data is copied to fill each buffer in order, with the final buffer
@@ -369,7 +417,7 @@ impl UnixStream {
     }
 
     cfg_io_util! {
-        /// Try to read data from the stream into the provided buffer, advancing the
+        /// Tries to read data from the stream into the provided buffer, advancing the
         /// buffer's internal cursor, returning how many bytes were read.
         ///
         /// Receives any pending data from the socket but does not wait for new data
@@ -449,7 +497,7 @@ impl UnixStream {
         }
     }
 
-    /// Wait for the socket to become writable.
+    /// Waits for the socket to become writable.
     ///
     /// This function is equivalent to `ready(Interest::WRITABLE)` and is usually
     /// paired with `try_write()`.
@@ -535,7 +583,7 @@ impl UnixStream {
         self.io.registration().poll_write_ready(cx).map_ok(|_| ())
     }
 
-    /// Try to write a buffer to the stream, returning how many bytes were
+    /// Tries to write a buffer to the stream, returning how many bytes were
     /// written.
     ///
     /// The function will attempt to write the entire contents of `buf`, but
@@ -591,7 +639,7 @@ impl UnixStream {
             .try_io(Interest::WRITABLE, || (&*self.io).write(buf))
     }
 
-    /// Try to write several buffers to the stream, returning how many bytes
+    /// Tries to write several buffers to the stream, returning how many bytes
     /// were written.
     ///
     /// Data is written from each buffer in order, with the final buffer read
@@ -653,10 +701,10 @@ impl UnixStream {
             .try_io(Interest::WRITABLE, || (&*self.io).write_vectored(buf))
     }
 
-    /// Try to read or write from the socket using a user-provided IO operation.
+    /// Tries to read or write from the socket using a user-provided IO operation.
     ///
     /// If the socket is ready, the provided closure is called. The closure
-    /// should attempt to perform IO operation from the socket by manually
+    /// should attempt to perform IO operation on the socket by manually
     /// calling the appropriate syscall. If the operation fails because the
     /// socket is not actually ready, then the closure should return a
     /// `WouldBlock` error and the readiness flag is cleared. The return value
@@ -675,6 +723,11 @@ impl UnixStream {
     /// defined on the Tokio `UnixStream` type, as this will mess with the
     /// readiness flag and can cause the socket to behave incorrectly.
     ///
+    /// This method is not intended to be used with combined interests.
+    /// The closure should perform only one type of IO operation, so it should not
+    /// require more than one ready state. This method may panic or sleep forever
+    /// if it is called with a combined interest.
+    ///
     /// Usually, [`readable()`], [`writable()`] or [`ready()`] is used with this function.
     ///
     /// [`readable()`]: UnixStream::readable()
@@ -685,23 +738,85 @@ impl UnixStream {
         interest: Interest,
         f: impl FnOnce() -> io::Result<R>,
     ) -> io::Result<R> {
-        self.io.registration().try_io(interest, f)
+        self.io
+            .registration()
+            .try_io(interest, || self.io.try_io(f))
     }
 
-    /// Creates new `UnixStream` from a `std::os::unix::net::UnixStream`.
+    /// Reads or writes from the socket using a user-provided IO operation.
     ///
-    /// This function is intended to be used to wrap a UnixStream from the
-    /// standard library in the Tokio equivalent. The conversion assumes
-    /// nothing about the underlying stream; it is left up to the user to set
-    /// it in non-blocking mode.
+    /// The readiness of the socket is awaited and when the socket is ready,
+    /// the provided closure is called. The closure should attempt to perform
+    /// IO operation on the socket by manually calling the appropriate syscall.
+    /// If the operation fails because the socket is not actually ready,
+    /// then the closure should return a `WouldBlock` error. In such case the
+    /// readiness flag is cleared and the socket readiness is awaited again.
+    /// This loop is repeated until the closure returns an `Ok` or an error
+    /// other than `WouldBlock`.
+    ///
+    /// The closure should only return a `WouldBlock` error if it has performed
+    /// an IO operation on the socket that failed due to the socket not being
+    /// ready. Returning a `WouldBlock` error in any other situation will
+    /// incorrectly clear the readiness flag, which can cause the socket to
+    /// behave incorrectly.
+    ///
+    /// The closure should not perform the IO operation using any of the methods
+    /// defined on the Tokio `UnixStream` type, as this will mess with the
+    /// readiness flag and can cause the socket to behave incorrectly.
+    ///
+    /// This method is not intended to be used with combined interests.
+    /// The closure should perform only one type of IO operation, so it should not
+    /// require more than one ready state. This method may panic or sleep forever
+    /// if it is called with a combined interest.
+    pub async fn async_io<R>(
+        &self,
+        interest: Interest,
+        mut f: impl FnMut() -> io::Result<R>,
+    ) -> io::Result<R> {
+        self.io
+            .registration()
+            .async_io(interest, || self.io.try_io(&mut f))
+            .await
+    }
+
+    /// Creates new [`UnixStream`] from a [`std::os::unix::net::UnixStream`].
+    ///
+    /// This function is intended to be used to wrap a `UnixStream` from the
+    /// standard library in the Tokio equivalent.
+    ///
+    /// # Notes
+    ///
+    /// The caller is responsible for ensuring that the stream is in
+    /// non-blocking mode. Otherwise all I/O operations on the stream
+    /// will block the thread, which will cause unexpected behavior.
+    /// Non-blocking mode can be set using [`set_nonblocking`].
+    ///
+    /// [`set_nonblocking`]: std::os::unix::net::UnixStream::set_nonblocking
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tokio::net::UnixStream;
+    /// use std::os::unix::net::UnixStream as StdUnixStream;
+    /// # use std::error::Error;
+    ///
+    /// # async fn dox() -> Result<(), Box<dyn Error>> {
+    /// let std_stream = StdUnixStream::connect("/path/to/the/socket")?;
+    /// std_stream.set_nonblocking(true)?;
+    /// let stream = UnixStream::from_std(std_stream)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// # Panics
     ///
-    /// This function panics if thread-local runtime is not set.
+    /// This function panics if it is not called from within a runtime with
+    /// IO enabled.
     ///
     /// The runtime is usually set implicitly when this function is called
     /// from a future driven by a tokio runtime, otherwise runtime can be set
     /// explicitly with [`Runtime::enter`](crate::runtime::Runtime::enter) function.
+    #[track_caller]
     pub fn from_std(stream: net::UnixStream) -> io::Result<UnixStream> {
         let stream = mio::net::UnixStream::from_std(stream);
         let io = PollEvented::new(stream)?;
@@ -709,7 +824,7 @@ impl UnixStream {
         Ok(UnixStream { io })
     }
 
-    /// Turn a [`tokio::net::UnixStream`] into a [`std::os::unix::net::UnixStream`].
+    /// Turns a [`tokio::net::UnixStream`] into a [`std::os::unix::net::UnixStream`].
     ///
     /// The returned [`std::os::unix::net::UnixStream`] will have nonblocking
     /// mode set as `true`.  Use [`set_nonblocking`] to change the blocking
@@ -718,6 +833,7 @@ impl UnixStream {
     /// # Examples
     ///
     /// ```
+    /// # if cfg!(miri) { return } // No `socket` in miri.
     /// use std::error::Error;
     /// use std::io::Read;
     /// use tokio::net::UnixListener;
@@ -750,7 +866,7 @@ impl UnixStream {
     pub fn into_std(self) -> io::Result<std::os::unix::net::UnixStream> {
         self.io
             .into_inner()
-            .map(|io| io.into_raw_fd())
+            .map(IntoRawFd::into_raw_fd)
             .map(|raw_fd| unsafe { std::os::unix::net::UnixStream::from_raw_fd(raw_fd) })
     }
 
@@ -834,7 +950,7 @@ impl UnixStream {
     // These lifetime markers also appear in the generated documentation, and make
     // it more clear that this is a *borrowed* split.
     #[allow(clippy::needless_lifetimes)]
-    /// Split a `UnixStream` into a read half and a write half, which can be used
+    /// Splits a `UnixStream` into a read half and a write half, which can be used
     /// to read and write the stream concurrently.
     ///
     /// This method is more efficient than [`into_split`], but the halves cannot be
@@ -956,5 +1072,11 @@ impl fmt::Debug for UnixStream {
 impl AsRawFd for UnixStream {
     fn as_raw_fd(&self) -> RawFd {
         self.io.as_raw_fd()
+    }
+}
+
+impl AsFd for UnixStream {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        unsafe { BorrowedFd::borrow_raw(self.as_raw_fd()) }
     }
 }

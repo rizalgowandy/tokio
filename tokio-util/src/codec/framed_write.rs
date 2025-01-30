@@ -15,7 +15,18 @@ use std::task::{Context, Poll};
 pin_project! {
     /// A [`Sink`] of frames encoded to an `AsyncWrite`.
     ///
+    /// For examples of how to use `FramedWrite` with a codec, see the
+    /// examples on the [`codec`] module.
+    ///
+    /// # Cancellation safety
+    ///
+    /// * [`futures_util::sink::SinkExt::send`]: if send is used as the event in a
+    /// `tokio::select!` statement and some other branch completes first, then it is
+    /// guaranteed that the message was not sent, but the message itself is lost.
+    ///
     /// [`Sink`]: futures_sink::Sink
+    /// [`codec`]: crate::codec
+    /// [`futures_util::sink::SinkExt::send`]: futures_util::sink::SinkExt::send
     pub struct FramedWrite<T, E> {
         #[pin]
         inner: FramedImpl<T, E, WriteFrame>,
@@ -88,6 +99,32 @@ impl<T, E> FramedWrite<T, E> {
         &mut self.inner.codec
     }
 
+    /// Maps the encoder `E` to `C`, preserving the write buffer
+    /// wrapped by `Framed`.
+    pub fn map_encoder<C, F>(self, map: F) -> FramedWrite<T, C>
+    where
+        F: FnOnce(E) -> C,
+    {
+        // This could be potentially simplified once rust-lang/rust#86555 hits stable
+        let FramedImpl {
+            inner,
+            state,
+            codec,
+        } = self.inner;
+        FramedWrite {
+            inner: FramedImpl {
+                inner,
+                state,
+                codec: map(codec),
+            },
+        }
+    }
+
+    /// Returns a mutable reference to the underlying encoder.
+    pub fn encoder_pin_mut(self: Pin<&mut Self>) -> &mut E {
+        self.project().inner.project().codec
+    }
+
     /// Returns a reference to the write buffer.
     pub fn write_buffer(&self) -> &BytesMut {
         &self.inner.state.buffer
@@ -96,6 +133,16 @@ impl<T, E> FramedWrite<T, E> {
     /// Returns a mutable reference to the write buffer.
     pub fn write_buffer_mut(&mut self) -> &mut BytesMut {
         &mut self.inner.state.buffer
+    }
+
+    /// Returns backpressure boundary
+    pub fn backpressure_boundary(&self) -> usize {
+        self.inner.state.backpressure_boundary
+    }
+
+    /// Updates backpressure boundary
+    pub fn set_backpressure_boundary(&mut self, boundary: usize) {
+        self.inner.state.backpressure_boundary = boundary;
     }
 }
 

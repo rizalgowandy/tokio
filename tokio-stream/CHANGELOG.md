@@ -1,3 +1,115 @@
+# 0.1.17 (December 6th, 2024)
+
+- deps: fix dev-dependency on tokio-test ([#6931], [#7019])
+- stream: fix link on `Peekable` ([#6861])
+- sync: fix `Stream` link in broadcast docs ([#6873])
+
+[#6861]: https://github.com/tokio-rs/tokio/pull/6861
+[#6873]: https://github.com/tokio-rs/tokio/pull/6873
+[#6931]: https://github.com/tokio-rs/tokio/pull/6931
+[#7019]: https://github.com/tokio-rs/tokio/pull/7019
+
+# 0.1.16 (September 5th, 2024)
+
+This release bumps the MSRV of tokio-stream to 1.70.
+
+- stream: add `next_many` and `poll_next_many` to `StreamMap` ([#6409])
+- stream: make stream adapters public ([#6658])
+- readme: add readme for tokio-stream ([#6456])
+
+[#6409]: https://github.com/tokio-rs/tokio/pull/6409
+[#6658]: https://github.com/tokio-rs/tokio/pull/6658
+[#6456]: https://github.com/tokio-rs/tokio/pull/6456
+
+# 0.1.15 (March 14th, 2024)
+
+This release bumps the MSRV of tokio-stream to 1.63.
+
+- docs: fix typo in argument name ([#6389])
+- docs: fix typo in peekable docs ([#6130])
+- docs: link to latest version of tokio-util docs ([#5694])
+- docs: typographic improvements ([#6262])
+- stream: add `StreamExt::peekable` ([#6095])
+
+[#5694]: https://github.com/tokio-rs/tokio/pull/5694
+[#6095]: https://github.com/tokio-rs/tokio/pull/6095
+[#6130]: https://github.com/tokio-rs/tokio/pull/6130
+[#6262]: https://github.com/tokio-rs/tokio/pull/6262
+[#6389]: https://github.com/tokio-rs/tokio/pull/6389
+
+# 0.1.14 (April 26th, 2023)
+
+This bugfix release bumps the minimum version of Tokio to 1.15, which is
+necessary for `timeout_repeating` to compile. ([#5657])
+
+[#5657]: https://github.com/tokio-rs/tokio/pull/5657
+
+# 0.1.13 (April 25th, 2023)
+
+This release bumps the MSRV of tokio-stream to 1.56.
+
+- stream: add "full" feature flag ([#5639])
+- stream: add `StreamExt::timeout_repeating` ([#5577])
+- stream: add `StreamNotifyClose` ([#4851])
+
+[#4851]: https://github.com/tokio-rs/tokio/pull/4851
+[#5577]: https://github.com/tokio-rs/tokio/pull/5577
+[#5639]: https://github.com/tokio-rs/tokio/pull/5639
+
+# 0.1.12 (January 20, 2023)
+
+- time: remove `Unpin` bound on `Throttle` methods ([#5105])
+- time: document that `throttle` operates on ms granularity ([#5101])
+- sync: add `WatchStream::from_changes` ([#5432])
+
+[#5105]: https://github.com/tokio-rs/tokio/pull/5105
+[#5101]: https://github.com/tokio-rs/tokio/pull/5101
+[#5432]: https://github.com/tokio-rs/tokio/pull/5432
+
+# 0.1.11 (October 11, 2022)
+
+- time: allow `StreamExt::chunks_timeout` outside of a runtime ([#5036])
+
+[#5036]: https://github.com/tokio-rs/tokio/pull/5036
+
+# 0.1.10 (Sept 18, 2022)
+
+- time: add `StreamExt::chunks_timeout` ([#4695])
+- stream: add track_caller to public APIs ([#4786])
+
+[#4695]: https://github.com/tokio-rs/tokio/pull/4695
+[#4786]: https://github.com/tokio-rs/tokio/pull/4786
+
+# 0.1.9 (June 4, 2022)
+
+- deps: upgrade `tokio-util` dependency to `0.7.x` ([#3762])
+- stream: add `StreamExt::map_while` ([#4351])
+- stream: add `StreamExt::then` ([#4355])
+- stream: add cancel-safety docs to `StreamExt::next` and `try_next` ([#4715])
+- stream: expose `Elapsed` error ([#4502])
+- stream: expose `Timeout` ([#4601])
+- stream: implement `Extend` for `StreamMap` ([#4272])
+- sync: add `Clone` to `RecvError` types ([#4560])
+
+[#3762]: https://github.com/tokio-rs/tokio/pull/3762
+[#4272]: https://github.com/tokio-rs/tokio/pull/4272
+[#4351]: https://github.com/tokio-rs/tokio/pull/4351
+[#4355]: https://github.com/tokio-rs/tokio/pull/4355
+[#4502]: https://github.com/tokio-rs/tokio/pull/4502
+[#4560]: https://github.com/tokio-rs/tokio/pull/4560
+[#4601]: https://github.com/tokio-rs/tokio/pull/4601
+[#4715]: https://github.com/tokio-rs/tokio/pull/4715
+
+# 0.1.8 (October 29, 2021)
+
+- stream: add `From<Receiver<T>>` impl for receiver streams ([#4080])
+- stream: impl `FromIterator` for `StreamMap` ([#4052])
+- signal: make windows docs for signal module show up on unix builds ([#3770])
+
+[#3770]: https://github.com/tokio-rs/tokio/pull/3770
+[#4052]: https://github.com/tokio-rs/tokio/pull/4052
+[#4080]: https://github.com/tokio-rs/tokio/pull/4080
+
 # 0.1.7 (July 7, 2021)
 
 ### Fixed
